@@ -40,6 +40,32 @@ static int romfs_identity_accepts(NSString *img) {
     if (rc != ROMFS_ID_OK && rc != ROMFS_ID_NONE) fprintf(stderr, "[RED] boot: Documents/romfs.img is not the image this build needs (verdict %d); not used\n", rc);
     return rc == ROMFS_ID_OK || rc == ROMFS_ID_NONE;
 }
+// Files-app delivery (Apple Vision Pro runs this iPad app where devicectl cannot reach Documents, so the image arrives by hand): accept a misnamed copy.
+// When Documents/romfs.img is absent, a regular file up to two levels down whose first 8 bytes are the image magic (RomFS.img, romfs.img.img, v0/RomFS.img, ...) is moved there.
+// The identity check that follows still decides whether it is used. Every candidate is logged so a wrong placement shows in log.txt.
+static void romfs_adopt_misnamed(NSString *doc) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *img = [doc stringByAppendingPathComponent:@"romfs.img"];
+    if ([fm fileExistsAtPath:img]) return;
+    NSDirectoryEnumerator<NSString *> *en = [fm enumeratorAtPath:doc];
+    for (NSString *rel in en) {
+        if (en.level > 2) { [en skipDescendants]; continue; }
+        NSString *first = rel.pathComponents.firstObject;
+        if ([first isEqualToString:@"save"] || [first isEqualToString:@"temp"]) { [en skipDescendants]; continue; }
+        NSDictionary *a = en.fileAttributes;
+        if (![a[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
+        unsigned long long size = [a[NSFileSize] unsignedLongLongValue];
+        fprintf(stderr, "boot: Documents/%s (%llu bytes)\n", rel.fileSystemRepresentation, size);
+        if (size < (1ull << 20)) continue;
+        NSString *path = [doc stringByAppendingPathComponent:rel];
+        FILE *f = fopen(path.fileSystemRepresentation, "rb"); char magic[8] = {0};
+        size_t n = f ? fread(magic, 1, sizeof magic, f) : 0; if (f) fclose(f);
+        if (n != sizeof magic || memcmp(magic, "DMROMFS1", 8)) continue;
+        NSError *e = nil;
+        if ([fm moveItemAtPath:path toPath:img error:&e]) { fprintf(stderr, "boot: moved Documents/%s to Documents/romfs.img\n", rel.fileSystemRepresentation); return; }
+        fprintf(stderr, "[RED] boot: could not move Documents/%s to romfs.img: %s\n", rel.fileSystemRepresentation, e.localizedDescription.UTF8String);
+    }
+}
 static NSString *romfs_locate(void) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
@@ -127,6 +153,7 @@ static int boot_env(void) {
     NSString *lang = [NSBundle.mainBundle objectForInfoDictionaryKey:@"DMLanguage"];
     if (!getenv("DM_LANG") && [lang isKindOfClass:NSString.class] && lang.length) setenv("DM_LANG", lang.UTF8String, 0);
     fprintf(stderr, "boot: game language %s\n", getenv("DM_LANG") ?: "en-US");
+    romfs_adopt_misnamed(doc);
     NSString *romfs = romfs_locate();
     if (!romfs) { romfs_identity_report(doc); fprintf(stderr, "boot: game files not found (Documents/romfs.img, Documents/romfs or <App>/romfs)\n"); return 0; }
     fprintf(stderr, "boot: game files %s\n", romfs.fileSystemRepresentation);
@@ -162,6 +189,9 @@ void front_ios_boot(void) {   // Called by front_ios.m once the window and Metal
     pthread_t t; pthread_create(&t, &a, boot_thread, NULL); pthread_detach(t);
 }
 int front_ios_boot_ok(void) { return g_boot_ok; }
+#if TARGET_OS_VISION   // the visionOS app has a SwiftUI entry point (dm/visionos/Sources/PortalVisionApp.swift), which boots through this instead of main()
+int dm_vision_boot(void) { @autoreleasepool { g_boot_ok = boot_env(); } return g_boot_ok; }
+#endif
 
 @interface App : UIResponder <UIApplicationDelegate>
 @end

@@ -457,6 +457,12 @@ HLE_FORCE("_ZN2nn5audio25GetReleasedAudioOutBufferEPNS0_8AudioOutE", "get a play
 // No device is listed and an open fails, so the calls that need an open AudioIn are never reached; they still answer without touching the guest object, in case a game ignores the open's result.
 // The buffer descriptor functions (SetAudioInBufferInfo, GetAudioInBufferDataPointer / Size) only fill and read the game's own struct and run in the sdk
 HLE_FORCE("_ZN2nn5audio12ListAudioInsEPNS0_11AudioInInfoEi", "audio input device list; the host has no microphone: 0 entries", int, h_ai_List, void *info, int n) { (void)info; (void)n; return 0; }
+// Portal 2 1.0.0's SDL input-device monitor calls this before listing microphones
+// (main+0x19fb28, SDK 13.3.0+0x56300). The SDK reaches audren:u even with no
+// input device. Our input list is permanently empty, so its change event stays
+// unsignaled, like the output-device notification in hle_audren.c.
+HLE_FORCE("_ZN2nn5audio38AcquireAudioDeviceNotificationForInputEPNS_2os11SystemEventE", "input device change notification: bound, never signaled (no microphone)",
+          Result, h_ai_Notify, void *ev) { hle_bind_system_event(ev, 0); return RES_OK; }
 static Result ai_open(const char *name, void *lr) {
     static _Atomic int once; char sb[64];
     if (!atomic_exchange(&once, 1)) LOG("audio input %s: the host has no microphone, the open fails (call site %s)", name ? name : "(default)", site(lr, sb, sizeof sb));

@@ -1,0 +1,39 @@
+# Portal 2 base 1.0.0, SDK 13.3.0. Mac bring-up in progress; see README.md.
+# Source engine in 21 NRO modules; no subsdk2 in this build.
+
+# ---- Identity ----
+title_id	0100ABD01785C000
+program_id	0100ABD01785C000
+
+# ---- App ----
+name	Portal 2
+ipa	Portal2.ipa
+app_category	public.app-category.games
+pad_layout	full
+depth_mode	zero
+
+# ---- Versions ----
+build	v0	1.0.0	main=388ffb1644afcdef30b8d2a2dfb62fba	subsdk0=2f31216323724e1ff64f03eef5fe030d	sdk=2bf3519216f5b9d3e8ce26863c2e98b6
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+romfs_marker	game.zip
+zip_store	.nro:.zip:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/game.zip/=game
+shader_note	Portal 2 shaders
+
+# ---- After the NRO collection ----
+# the NROs the game loads at run time import from subsdk0 (GLSLC), which main does not
+modules	main subsdk0 sdk

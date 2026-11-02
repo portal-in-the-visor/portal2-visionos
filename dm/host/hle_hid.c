@@ -8,6 +8,7 @@
 #include "hle_haptics.h"
 #include "dm_input.h"
 #include "front.h"
+#include "vr_view.h"
 #include <stdatomic.h>
 #include <unistd.h>
 #include <strings.h>
@@ -245,7 +246,28 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
         b |= atomic_load(&g_pad_btn[p]) | atomic_exchange(&g_pad_latch[p], 0);
         uint64_t v = atomic_load(&g_pad_axes[p]); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(v, i));
     }
+    // VR with hand aim (hle_vrview.c): the game walks along its view angles, which follow the hand; the left stick is turned by the head's yaw away from
+    // the hand, so walking goes where you look (the user's preference)
+    if (!pl) { float rot = vr_view_move_rotation();
+        if (rot != 0) { float t = rot * (float)M_PI / 180.f, c = cosf(t), sn = sinf(t), x = (float)a[0], y = (float)a[1];
+            float nx = x * c - y * sn, ny = x * sn + y * c, lim = 32767.f;
+            a[0] = (int32_t)fmaxf(-lim, fminf(lim, nx)); a[1] = (int32_t)fmaxf(-lim, fminf(lim, ny)); } }
     s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
+    // Bounded diagnostic only: compare delivered axes with the Mac framework's
+    // raw state and callbacks, without changing input or its release semantics.
+    static _Thread_local int trace = -1;
+    static _Thread_local double trace_start, trace_last;
+    if (trace < 0) { const char *e = getenv("DM_INPUT_TRACE"); trace = e && atoi(e); }
+    if (trace) {
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        double now = ts.tv_sec + ts.tv_nsec / 1e9;
+        if (!trace_start) trace_start = now;
+        if (now - trace_start > 180) trace = 0;
+        else if (now - trace_last >= 0.25) {
+            trace_last = now;
+            LOG("input trace delivered npad %u source mask %#x sample %lld: buttons %#llx axes %d %d %d %d", id, src, (long long)s->sampling, (unsigned long long)b, a[0], a[1], a[2], a[3]);
+        }
+    }
     b &= 0xffffull;
     if (s->lx < -STICK_THRESH) b |= 1u << 16;
     if (s->ly > STICK_THRESH) b |= 1u << 17;

@@ -69,7 +69,11 @@ private struct LauncherView: View {
 
     @ViewBuilder var playButton: some View {
         let button = Button(action: play) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large)
+        #if os(visionOS)
+        button.buttonStyle(.borderedProminent)   // glassProminent is unavailable on visionOS
+        #else
         if #available(iOS 26.0, *) { button.buttonStyle(.glassProminent) } else { button.buttonStyle(.borderedProminent) }
+        #endif
     }
 
     private func appIcon() -> UIImage? {

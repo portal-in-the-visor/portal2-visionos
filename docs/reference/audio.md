@@ -236,6 +236,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** `ListAudioIns` reports none, both opens fail, and the calls that need an open AudioIn answer without touching the game's object (`hle_audio.c`).
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (SDK 18.3.2, FNA on .NET NativeAOT with SDL3; one boot each).
 
+### Audio input device-change notification
+
+- **Symptom:** startup aborts through `audren:u` before the first rendered frame, under `AcquireAudioDeviceNotificationForInput`.
+- **Cause:** SDL's audio-device monitor requests the event before listing microphones (`main+0x19fb28`, SDK 13.3.0 `sdk+0x56300`). The unhooked SDK entry opens the audio-device service even though the host exposes no input devices.
+- **Fix:** `hle_audio.c` binds a valid unsignaled system event and returns success. The host's input-device list is permanently empty, so there are no device-list changes to signal. This mirrors the output-device notification and does not disable the audio renderer.
+- **Found on:** [Portal 2](../../dm/games/0100ABD01785C000/README.md) (1.0.0, SDK 13.3.0); title and opening room with audible output after the fix.
+
 ## Codecs
 
 ### Hardware Opus decoders built on the SDK's software decoders

@@ -746,6 +746,46 @@ def vs_depth(src):
     single = src[:m.start()] + gl
     return single, single + '\n' + re.sub(r'\bmain0\s*\(', 'main0_z(', body, count=1)
 
+def fs_alpha_test(src):
+    """NVN fixed-function alpha rejection, before depth/stencil writes.
+
+    The host binds an immutable per-draw {function, reference} at fragment buffer
+    15 (separate from translated descriptor set 0). Apply to color 0's alpha;
+    integer-output variants are subsequently derived from this same float body.
+    """
+    st = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
+    if not st: return src
+    color = re.search(r'\b(?:float4|half4)\s+(\w+)\s*\[\[color\(0\)\]\]', st.group(1))
+    if not color: return src
+    entry = re.search(r'\bfragment\s+main0_out\s+main0\s*\((.*?)\)\s*\{', src, re.S)
+    if not entry: raise ValueError('alpha test: color 0 but no recognized fragment entry')
+    if re.search(r'\[\[buffer\(15\)\]\]', src): raise ValueError('alpha test: fragment buffer 15 already used')
+    args = entry.group(1)
+    extra = (', ' if args.strip() else '') + 'constant dm_alpha_state& dm_alpha [[buffer(15)]]'
+    src = src[:entry.start(1)] + args + extra + src[entry.end(1):]
+    # Forced early tests would update stencil before discard_fragment rejects it.
+    src = src.replace('[[early_fragment_tests]]', '')
+    check = '{ if (!dm_alpha_pass(float(out.%s.w), dm_alpha)) discard_fragment(); return out; }' % color.group(1)
+    src = src.replace('return out;', check)
+    helper = """
+struct dm_alpha_state { uint function; float reference; };
+inline bool dm_alpha_pass(float a, constant dm_alpha_state& s) {
+    switch (s.function) {
+        case 1: return false;
+        case 2: return a < s.reference;
+        case 3: return a == s.reference;
+        case 4: return a <= s.reference;
+        case 5: return a > s.reference;
+        case 6: return a != s.reference;
+        case 7: return a >= s.reference;
+        default: return true; // NVN_ALPHA_FUNC_ALWAYS (8)
+    }
+}
+"""
+    pos = src.index('struct main0_out')
+    return src[:pos] + helper + src[pos:]
+
+
 def fs_uint(src):
     """Integer colour targets. With no PC version the translator declares every fragment output float; a shader writes an integer as the float with its bits (as_type<float>(…)), and Metal
     refuses a pipeline whose float output meets an integer attachment. Luigi's Mansion 3 draws its whole scene into an R32Uint + RGBA8Uint G-buffer (1,377 of its 4,307 pixel shaders write
@@ -944,6 +984,8 @@ def finish(key, w, j, c1):
         plain = full
         full, lay = vs_layer_entry(full)   # layer entry points for a slice-writing geometry shader (see vs_layer_entry)
         open(msl, 'w').write(full)
+    if j['stage'] == 'ps':
+        src = fs_alpha_test(src); open(msl, 'w').write(src)
     fu, fmask = fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
     if fu: plain = src; open(msl, 'w').write(fu)
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)

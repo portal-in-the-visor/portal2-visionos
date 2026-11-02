@@ -96,7 +96,9 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);
 enum { OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)
        OBS_REGION_ASK = 22, OBS_REGION_GOT = 23, OBS_REGION_FREE = 24,   // the SDK's address regions, gates the rewriter places by symbol in every sdk (patch_nso.py "Address regions", hle_svc.c)
        OBS_STDALLOC_INIT = 25,                                         // StandardAllocator::Initialize's entry, the same way: the one gate whose callback writes a register (hle_svc.c)
-       OBS_MAX = 26 };
+       OBS_SOURCE_RENDERVIEW = 26,                                     // Portal 2 1.0.0 client.nro: CViewRender::RenderView entry, x1 = the CViewSetup (hle_vrview.c, VR camera)
+       OBS_SOURCE_VIEWMODEL = 27,                                      // Portal 2 1.0.0 client.nro: C_BaseViewModel::CalcViewModelView entry, x2/x3 = eye origin/angles (hle_vrview.c, gun in the hand)
+       OBS_MAX = 28 };
 // A gate number's bits from 8 up are a parameter for its callback (OBS_REGION_GOT: the register that holds the address). Callbacks read the registers; a write to x0–x29 takes
 // effect when the gate returns (entry.S restores them from the frame), which only OBS_STDALLOC_INIT does
 void gate_obs_set(int id, void (*fn)(uint64_t *regs, int param));

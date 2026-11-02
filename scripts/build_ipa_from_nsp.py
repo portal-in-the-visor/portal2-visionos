@@ -1051,6 +1051,9 @@ def glslc_done(d):   # capture files written whole: a GLSLC output (magic 0x1986
 
 
 def apple_silicon():   # hw.optional.arm64 is 1 on Apple silicon (for a Python under Rosetta too); an Intel Mac has no such key
+    # Native arm64 Python already establishes the architecture when a restricted
+    # environment denies sysctl. Keep the hardware query for Rosetta processes.
+    if sys.platform == 'darwin' and os.uname().machine == 'arm64': return True
     return subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], capture_output=True, text=True).stdout.strip() == '1'
 
 

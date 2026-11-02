@@ -118,6 +118,7 @@ static void on_key(NSEvent *e, int down) {
 static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
 static int g_merge, g_kbd_own;
+static int g_input_trace;   // opt-in, bounded raw-vs-published controller diagnostic
 static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
 static void pad_read(GCExtendedGamepad *g) {
     if (!g_input_on) return;
@@ -130,6 +131,7 @@ static void pad_read(GCExtendedGamepad *g) {
     K(g.buttonMenu, DM_BTN_PLUS); K(g.buttonOptions, DM_BTN_MINUS); K(g.leftThumbstickButton, DM_BTN_LS); K(g.rightThumbstickButton, DM_BTN_RS);   // nil on pads without them: not pressed
     K(g.dpad.left, DM_BTN_LEFT); K(g.dpad.up, DM_BTN_UP); K(g.dpad.right, DM_BTN_RIGHT); K(g.dpad.down, DM_BTN_DOWN);
     #undef K
+    if (g_input_trace) LOG("input trace callback player %d active %d: buttons %#llx axes %.4f %.4f %.4f %.4f", p + 1, g_input_on, (unsigned long long)m, g.leftThumbstick.xAxis.value, g.leftThumbstick.yAxis.value, g.rightThumbstick.xAxis.value, g.rightThumbstick.yAxis.value);
     dm_pad_set_player(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
@@ -203,6 +205,22 @@ static void pads_start(void) {
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
     pads_changed(nil);
+    // Observe current framework state independently of valueChangedHandler. Do
+    // not republish it: that would hide a missing release callback during diagnosis.
+    const char *trace = getenv("DM_INPUT_TRACE");
+    if (trace && atoi(trace)) {
+        g_input_trace = 1;
+        __block int ticks = 0;
+        NSTimer *timer = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) {
+            if (++ticks > 720) { g_input_trace = 0; [t invalidate]; return; }
+            for (GCController *c in GCController.controllers) if (c.extendedGamepad) {
+                GCExtendedGamepad *g = c.extendedGamepad;
+                int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c);
+                LOG("input trace raw tick %d player %d active %d: axes %.4f %.4f %.4f %.4f", ticks, p + 1, g_input_on, g.leftThumbstick.xAxis.value, g.leftThumbstick.yAxis.value, g.rightThumbstick.xAxis.value, g.rightThumbstick.yAxis.value);
+            }
+        }];
+        [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+    }
     dm_motion_pro_start(pro_devices_changed);
 }
 

@@ -4321,7 +4321,7 @@ static struct {
     uint64_t tex[6][NTEX], samp[6][128], img[6][32];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; uint8_t vp_sw[16][4];   // vp_sw: viewport swizzles XOR the identity (p_vp_swizzle)
-    float blend_color[4]; int64_t copy_stride, copy_img_stride;
+    float blend_color[4], alpha_ref; int64_t copy_stride, copy_img_stride;
     p_tf_bind tf[4]; int tf_on, rast_discard;   // capture buffers and enables; byte offsets and captured count stay on the GPU (nvn_feedback.inc)
     int tex_base, samp_base;   // host-table bases of the texture / sampler pool bound (OP_SET_TEX_POOL / OP_SET_SAMP_POOL), for handles read at replay from uniform buffers (encode_args)
 } S;
@@ -6880,6 +6880,7 @@ static int state_op(uint32_t op, const void *a) {
         case OP_DEPTH_RANGE: { const p_depth_range *b = a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
         case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_depth_clamp *)a)->on; break;
         case OP_VP_SWIZZLE: { const p_vp_swizzle *b = a; memcpy(S.vp_sw[b->first], b->sw, 4 * (size_t)b->n); break; }
+        case OP_ALPHA_REF: S.alpha_ref = ((const p_alpha_ref *)a)->value; break;
         case OP_BLEND_COLOR: memcpy(S.blend_color, ((const p_blend_color *)a)->rgba, 16); break;
         case OP_COPY_STRIDE: { const p_copy_stride *cs = a; if (cs->image) S.copy_img_stride = cs->stride; else S.copy_stride = cs->stride; break; }
         case OP_TF_BIND: { const p_tf_bind *b = a; if (b->index >= 0 && b->index < 4) S.tf[b->index] = *b; break; }
@@ -7097,7 +7098,7 @@ static int sm_scan(const uint8_t *p, const p_set_rt *rt, int cur, int *lo, int *
             case OP_UPDATE_UB: if (!ubd_on()) return n; break;
             case OP_DRAW: case OP_DRAW_IDX: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM:
             case OP_BIND_VBUF: case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL: case OP_POLY_OFFSET:
-            case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: break;
+            case OP_ALPHA_REF: case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: break;
             default: return n;
         }
         p += h.size;
@@ -8638,7 +8639,7 @@ static int lc_keeps(uint32_t op) {
         case OP_SET_RT: case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_DRAW: case OP_DRAW_IDX: case OP_BEGIN: case OP_JUMP: case OP_CALL:
         case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
         case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
-        case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
+        case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_ALPHA_REF: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
         case OP_TF_BIND: case OP_TF_STATE: case OP_RAST_DISCARD: case OP_PRIM_RESTART: case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_RENDER_COND:
         case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: return 1;
         default: return 0;
@@ -8928,7 +8929,16 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     g_kd_force = kd_draw(pr, dw, di);
     if (pr->sh[0]) encode_args(en, pr->sh[0], 0, 1);
-    if (pr->sh[1] && !S.rast_discard) encode_args(en, pr->sh[1], 1, 0);
+    if (pr->sh[1] && !S.rast_discard) {
+        encode_args(en, pr->sh[1], 1, 0);
+        // Fragment alpha rejection must happen before depth/stencil updates.
+        // The draw owns these bytes until GPU completion; later state changes
+        // must not overwrite the reference of already encoded draws.
+        struct { uint32_t function; float reference; } alpha = {S.color.alpha_func, S.alpha_ref};
+        id<MTLBuffer> ab; size_t ao = arena_alloc(sizeof alpha, &ab);
+        memcpy((uint8_t *)ab.contents + ao, &alpha, sizeof alpha);
+        enc_r_args(en, MTLRenderStageFragment, ab.gpuAddress + ao, 15);
+    }
     // Parameter binding captures the actual resources under the registry lock; if the version changed between the eligibility check and the binding, split and retry before any GPU draw.
     if (g_rt_range_active && (g_pass.reg_gen != g_reg_gen || g_pass.ser_gen != g_ser_gen || g_pass.range_dirty != nvn_dirty_now())) { rp_end(); draw(dw, di); return; }
     int prim = dw ? dw->prim : di->prim;
@@ -8995,6 +9005,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
                dw ? dw->count : di->count, dw ? dw->instances : di->instances, S.color.blend_en, S.chmask.mask, (int)S.ds.dt, (int)S.ds.dw, (int)S.ds.df, (int)S.ds.st,
                (unsigned long)sc.x, (unsigned long)sc.y, (unsigned long)sc.width, (unsigned long)sc.height, (unsigned long)tw, (unsigned long)th,
                S.has_vp ? S.vp[0][0] : 0, S.has_vp ? S.vp[0][1] : 0, S.has_vp ? S.vp[0][2] : (float)tw, S.has_vp ? S.vp[0][3] : (float)th, S.has_vp ? S.dr[0] : 0.f, S.has_vp ? S.dr[1] : 1.f, (unsigned)S.color.logic_op);
+            PD("a %llu alpha_func=%u alpha_ref=%g", g_stat_pass, (unsigned)S.color.alpha_func, S.alpha_ref);
             PD("s %llu front cmp=%u fail=%u zfail=%u pass=%u ref=%#x read=%#x write=%#x back cmp=%u fail=%u zfail=%u pass=%u ref=%#x read=%#x write=%#x cull=%u winding=%u", g_stat_pass,
                S.ds.sf_f, S.ds.fail_f, S.ds.zfail_f, S.ds.zpass_f, S.st_ref[0], S.st_vmask[0], S.st_wmask[0],
                S.ds.sf_b, S.ds.fail_b, S.ds.zfail_b, S.ds.zpass_b, S.st_ref[1], S.st_vmask[1], S.st_wmask[1], S.poly.cull, S.poly.front);
@@ -9926,7 +9937,7 @@ void mtl_exec(const uint8_t *p) {
                 break; }
             case OP_SCISSOR: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
             case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
-            case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
+            case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_ALPHA_REF: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
                 state_op(h.op, a); break;
             case OP_TF_BIND: { const p_tf_bind *b = a; PD("Y tf bind %d addr=%#llx size=%llu", b->index, (unsigned long long)b->addr, (unsigned long long)b->size); state_op(h.op, a); break; }
             case OP_TF_STATE: { const p_tf_state *b = a; static const char *const w[4] = {"begin", "end", "pause", "resume"}; PD("Y tf %s ctl=%#llx", w[b->what & 3], (unsigned long long)b->ctl);
@@ -10515,6 +10526,9 @@ static void present_gpu_note(double s, int fx) {
     n[fx] = 0;
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
+// Present tap (Apple Vision Pro immersive view, dm/visionos/Sources/vr_tap.m): sees each presented frame before the window path, with a command buffer of the render queue
+// (as DM_NVN_REGLUM's read-back, queued after this frame's rendering) that it must commit. A nonzero return means the frame went elsewhere: the window is not presented
+int (*mtl_present_tap)(void *cb, void *src, const NSUInteger rect[4], uint64_t n);
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
@@ -10534,6 +10548,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     // the display queue page-faulted (kIOGPUCommandBufferCallbackErrorPageFault) and macOS then ignored every later command buffer of the process, so the window stayed pink
     // (headless runs never present, and every game before drew into a window texture before presenting it). A commit with nothing new costs nothing
     res_commit();
+    if (mtl_present_tap) { NSUInteger r[4]; if (present_crop_rect(src, crop, r) && mtl_present_tap(NULL, (__bridge void *)src, r, g_present_n)) return 0; }   // the tap copies with mtl_tap_copy
     // DM_NVN_REGLUM=x0,y0,x1,y1:file (normalized coordinates): read back this region on every present and record "present sequence number, present time ns, region mean luminance, subsampled grayscale thumbnail (hex)" (diagnostic: verify that animation speed is independent of frame rate).
     // A separate command buffer is queued after this frame's rendering (the same queue executes in submit order); does not wait for the GPU and does not disturb frame pacing
     static int rl = -1; static float rr[4]; static FILE *rlf; static pthread_mutex_t rlmu = PTHREAD_MUTEX_INITIALIZER;
@@ -10964,6 +10979,47 @@ static uint64_t snap_take(const tex_t *t) {
     }
     g_snap[k].ev = v;
     return g_snap[k].serial;
+}
+
+// VR present tap copy (dm/visionos/Sources/vr_tap.m): copy a presented frame into one of the tap's ring textures on the Metal 4 queue, behind the frame's own work
+// exactly as snap_take does, then signal ev := v. The first version copied through a legacy command buffer (q_cb), which is not ordered against the Metal 4 queue
+// nor the encode thread: in heavier scenes it read back buffers mid-render, and the headset showed magenta blocks the game's own passes never had
+// (DM_NVN_MAGSCAN found none). Returns 0 when that slot's previous copy has not finished (the caller keeps its older frame)
+enum { TAP_SLOTS = 3 };
+static id<MTL4CommandAllocator> g_tap_alloc[TAP_SLOTS]; static id<MTL4CommandBuffer> g_tap_cb[TAP_SLOTS]; static uint64_t g_tap_v[TAP_SLOTS];
+static id<MTLResidencySet> g_tap_res; static _Atomic uint64_t g_tap_cmt;
+int mtl_tap_copy(void *dstp, void *srcp, const NSUInteger r[4], void *evp, uint64_t v, int k) {
+    id<MTLTexture> dst = (__bridge id<MTLTexture>)dstp, src = (__bridge id<MTLTexture>)srcp; id<MTLSharedEvent> ev = (__bridge id<MTLSharedEvent>)evp;
+    if (k < 0 || k >= TAP_SLOTS || !g_q4) return 0;
+    if (g_tap_v[k] && ev.signaledValue < g_tap_v[k]) return 0;
+    if (!g_tap_res) {
+        MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new]; rd.initialCapacity = 8; NSError *e = nil;
+        g_tap_res = [g_dev newResidencySetWithDescriptor:rd error:&e]; if (!g_tap_res) { RED_ONCE(130, "vr tap: no residency set: %s", e.localizedDescription.UTF8String); return 0; }
+        [g_q4 addResidencySet:g_tap_res];
+        for (int i = 0; i < TAP_SLOTS; i++) { g_tap_alloc[i] = [g_dev newCommandAllocator]; g_tap_cb[i] = [g_dev newCommandBuffer]; }
+    }
+    if (![g_tap_res containsAllocation:dst]) { [g_tap_res addAllocation:dst]; [g_tap_res commit]; }
+    [g_tap_alloc[k] reset];
+    id<MTL4CommandBuffer> cb = g_tap_cb[k];
+    [cb beginCommandBufferWithAllocator:g_tap_alloc[k]];
+    id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];
+    [ce copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(r[0], r[1], 0) sourceSize:MTLSizeMake(r[2], r[3], 1) toTexture:dst destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
+    [ce endEncoding]; [cb endCommandBuffer];
+    g_tap_v[k] = v;
+    if (rec_on() && g_rb_started) {
+        if (on_sub_thread()) rec_publish();
+        rec_blk *b = rec_own_begin();
+        rec_t *rr = rec_own_put(b, RO_COMMIT_REAL, 2); rr->a[0] = 0; rr->a[1] = rec_obj(cb);
+        rr = rec_own_put(b, RO_SIGNAL, 1); rr->a[0] = rec_obj(ev); rr->a[1] = v;
+        rr = rec_own_put(b, RO_NOTE, 0); rr->a[0] = (uint64_t)(uintptr_t)&g_tap_cmt; rr->a[1] = v;
+        rec_own_push(b);
+    } else {
+        pthread_mutex_lock(&g_res_mu); [g_q4 commit:&cb count:1]; [g_q4 signalEvent:ev value:v]; pthread_mutex_unlock(&g_res_mu);
+        atomic_store(&g_tap_cmt, v);
+    }
+    return 1;
 }
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val) {
     atomic_store(&dm_present_ns, now_ns());
